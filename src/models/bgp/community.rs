@@ -3,7 +3,7 @@ use num_enum::{FromPrimitive, IntoPrimitive};
 use std::fmt::{Display, Formatter};
 use std::net::{Ipv4Addr, Ipv6Addr};
 
-#[derive(Debug, PartialEq, Copy, Clone, Eq)]
+#[derive(Debug, PartialEq, Copy, Clone, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(untagged))]
 pub enum MetaCommunity {
@@ -13,7 +13,7 @@ pub enum MetaCommunity {
     Large(LargeCommunity),
 }
 
-#[derive(Debug, PartialEq, Copy, Clone, Eq)]
+#[derive(Debug, PartialEq, Copy, Clone, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Community {
     NoExport,
@@ -27,7 +27,7 @@ pub enum Community {
 /// ## Display
 ///
 /// Large community is displayed as `GLOBAL_ADMINISTRATOR:LOCAL_DATA_1:LOCAL_DATA_2`
-#[derive(Debug, PartialEq, Clone, Copy, Eq)]
+#[derive(Debug, PartialEq, Clone, Copy, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct LargeCommunity {
     pub global_admin: u32,
@@ -91,7 +91,7 @@ pub enum ExtendedCommunityType {
 ///       (*) Present for Extended types only, used for the Value field
 ///           otherwise.
 /// ```
-#[derive(Debug, PartialEq, Clone, Copy, Eq)]
+#[derive(Debug, PartialEq, Clone, Copy, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ExtendedCommunity {
     TransitiveTwoOctetAs(TwoOctetAsExtCommunity),
@@ -122,7 +122,7 @@ impl ExtendedCommunity {
     }
 }
 
-#[derive(Debug, PartialEq, Clone, Copy, Eq)]
+#[derive(Debug, PartialEq, Clone, Copy, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Ipv6AddrExtCommunity {
     pub community_type: ExtendedCommunityType,
@@ -136,7 +136,7 @@ pub struct Ipv6AddrExtCommunity {
 /// Two-Octet AS Specific Extended Community
 ///
 /// <https://datatracker.ietf.org/doc/html/rfc4360#section-3.1>
-#[derive(Debug, PartialEq, Clone, Copy, Eq)]
+#[derive(Debug, PartialEq, Clone, Copy, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TwoOctetAsExtCommunity {
     pub subtype: u8,
@@ -149,7 +149,7 @@ pub struct TwoOctetAsExtCommunity {
 /// Four-Octet AS Specific Extended Community
 ///
 /// <https://datatracker.ietf.org/doc/html/rfc5668#section-2>
-#[derive(Debug, PartialEq, Clone, Copy, Eq)]
+#[derive(Debug, PartialEq, Clone, Copy, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct FourOctetAsExtCommunity {
     pub subtype: u8,
@@ -162,7 +162,7 @@ pub struct FourOctetAsExtCommunity {
 /// IPv4 Address Specific Extended Community
 ///
 /// <https://datatracker.ietf.org/doc/html/rfc4360#section-3.2>
-#[derive(Debug, PartialEq, Clone, Copy, Eq)]
+#[derive(Debug, PartialEq, Clone, Copy, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Ipv4AddrExtCommunity {
     pub subtype: u8,
@@ -175,7 +175,7 @@ pub struct Ipv4AddrExtCommunity {
 /// Opaque Extended Community
 ///
 /// <https://datatracker.ietf.org/doc/html/rfc4360#section-3.3>
-#[derive(Debug, PartialEq, Clone, Copy, Eq)]
+#[derive(Debug, PartialEq, Clone, Copy, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct OpaqueExtCommunity {
     pub subtype: u8,
