@@ -4,6 +4,7 @@ use std::cmp::Ordering;
 use std::fmt::{Display, Formatter};
 use std::net::IpAddr;
 use std::str::FromStr;
+use std::sync::Arc;
 
 // TODO(jmeggitt): BgpElem can be converted to an enum. Apply this change during performance PR.
 
@@ -92,6 +93,7 @@ impl ElemType {
 /// - `only_to_customer`: The AS number to which the prefix is only announced.
 /// - `unknown`: Unknown attributes formatted as (TYPE, RAW_BYTES).
 /// - `deprecated`: Deprecated attributes formatted as (TYPE, RAW_BYTES).
+/// - `attributes`: Direct attributes to the original attribute.
 ///
 /// Note: Constructing BGP elements consumes more memory due to duplicate information
 /// shared between multiple elements of one MRT record.
@@ -148,6 +150,8 @@ pub struct BgpElem {
     pub unknown: Option<Vec<AttrRaw>>,
     /// deprecated attributes formatted as (TYPE, RAW_BYTES)
     pub deprecated: Option<Vec<AttrRaw>>,
+    /// Raw attributes
+    pub attributes: Option<Arc<Box<Attributes>>>
 }
 
 impl Eq for BgpElem {}
@@ -188,6 +192,7 @@ impl Default for BgpElem {
             only_to_customer: None,
             unknown: None,
             deprecated: None,
+            attributes: None,
         }
     }
 }

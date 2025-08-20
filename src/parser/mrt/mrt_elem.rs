@@ -11,6 +11,7 @@ use log::{error, warn};
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::net::{IpAddr, Ipv4Addr};
+use std::sync::Arc;
 
 pub struct Elementor {
     peer_table: Option<PeerIndexTable>,
@@ -29,7 +30,7 @@ macro_rules! get_attr_value {
 
 #[allow(clippy::type_complexity)]
 fn get_relevant_attributes(
-    attributes: Attributes,
+    attributes: &Attributes,
 ) -> (
     Option<AsPath>,
     Option<AsPath>,
@@ -71,39 +72,39 @@ fn get_relevant_attributes(
             } => as_path = Some(path),
             AttributeValue::AsPath { path, is_as4: true } => as4_path = Some(path),
             AttributeValue::NextHop(v) => next_hop = Some(v),
-            AttributeValue::MultiExitDiscriminator(v) => med = Some(v),
-            AttributeValue::LocalPreference(v) => local_pref = Some(v),
+            AttributeValue::MultiExitDiscriminator(v) => med = Some(v.clone()),
+            AttributeValue::LocalPreference(v) => local_pref = Some(v.clone()),
             AttributeValue::AtomicAggregate => atomic = true,
             AttributeValue::Communities(v) => communities_vec.extend(
-                v.into_iter()
+                v.iter().cloned()
                     .map(MetaCommunity::Plain)
                     .collect::<Vec<MetaCommunity>>(),
             ),
             AttributeValue::ExtendedCommunities(v) => communities_vec.extend(
-                v.into_iter()
+                v.iter().cloned()
                     .map(MetaCommunity::Extended)
                     .collect::<Vec<MetaCommunity>>(),
             ),
             AttributeValue::Ipv6AddressSpecificExtendedCommunities(v) => communities_vec.extend(
-                v.into_iter()
+                v.iter().cloned()
                     .map(MetaCommunity::Ipv6Extended)
                     .collect::<Vec<MetaCommunity>>(),
             ),
             AttributeValue::LargeCommunities(v) => communities_vec.extend(
-                v.into_iter()
+                v.iter().cloned()
                     .map(MetaCommunity::Large)
                     .collect::<Vec<MetaCommunity>>(),
             ),
-            AttributeValue::Aggregator { asn, id, .. } => aggregator = Some((asn, id)),
-            AttributeValue::MpReachNlri(nlri) => announced = Some(nlri),
-            AttributeValue::MpUnreachNlri(nlri) => withdrawn = Some(nlri),
-            AttributeValue::OnlyToCustomer(o) => otc = Some(o),
+            AttributeValue::Aggregator { asn, id, .. } => aggregator = Some((asn.clone(), id.clone())),
+            AttributeValue::MpReachNlri(nlri) => announced = Some(nlri.clone()),
+            AttributeValue::MpUnreachNlri(nlri) => withdrawn = Some(nlri.clone()),
+            AttributeValue::OnlyToCustomer(o) => otc = Some(o.clone()),
 
             AttributeValue::Unknown(t) => {
-                unknown.push(t);
+                unknown.push(t.clone());
             }
             AttributeValue::Deprecated(t) => {
-                deprecated.push(t);
+                deprecated.push(t.clone());
             }
 
             AttributeValue::OriginatorId(_)
@@ -118,10 +119,10 @@ fn get_relevant_attributes(
     };
 
     (
-        as_path,
-        as4_path,
-        origin,
-        next_hop,
+        as_path.cloned(),
+        as4_path.cloned(),
+        origin.copied(),
+        next_hop.copied(),
         local_pref,
         med,
         communities,
@@ -192,7 +193,9 @@ impl Elementor {
             only_to_customer,
             unknown,
             deprecated,
-        ) = get_relevant_attributes(msg.attributes);
+        ) = get_relevant_attributes(&msg.attributes);
+
+        let attributes = Arc::new(Box::new(msg.attributes));
 
         let path = match (as_path, as4_path) {
             (None, None) => None,
@@ -224,6 +227,7 @@ impl Elementor {
             only_to_customer,
             unknown: unknown.clone(),
             deprecated: deprecated.clone(),
+            attributes: Some(attributes.clone()),
         }));
 
         if let Some(nlri) = announced {
@@ -246,6 +250,7 @@ impl Elementor {
                 only_to_customer,
                 unknown: unknown.clone(),
                 deprecated: deprecated.clone(),
+                attributes: Some(attributes.clone()),
             }));
         }
 
@@ -268,6 +273,7 @@ impl Elementor {
             only_to_customer,
             unknown: None,
             deprecated: None,
+            attributes: Some(attributes.clone()),
         }));
         if let Some(nlri) = withdrawn {
             elems.extend(nlri.prefixes.into_iter().map(|p| BgpElem {
@@ -289,6 +295,7 @@ impl Elementor {
                 only_to_customer,
                 unknown: None,
                 deprecated: None,
+                attributes: Some(attributes.clone()),
             }));
         };
         elems
@@ -322,7 +329,7 @@ impl Elementor {
                     only_to_customer,
                     unknown,
                     deprecated,
-                ) = get_relevant_attributes(msg.attributes);
+                ) = get_relevant_attributes(&msg.attributes);
 
                 let origin_asns = as_path
                     .as_ref()
@@ -347,6 +354,7 @@ impl Elementor {
                     only_to_customer,
                     unknown,
                     deprecated,
+                    attributes: Some(Arc::new(Box::new(msg.attributes)))
                 });
             }
 
@@ -387,7 +395,9 @@ impl Elementor {
                                 only_to_customer,
                                 unknown,
                                 deprecated,
-                            ) = get_relevant_attributes(e.attributes);
+                            ) = get_relevant_attributes(&e.attributes);
+
+                            println!("{:?}", e.attributes);
 
                             let path = match (as_path, as4_path) {
                                 (None, None) => None,
@@ -442,6 +452,7 @@ impl Elementor {
                                 only_to_customer,
                                 unknown,
                                 deprecated,
+                                attributes: Some(Arc::new(Box::new(e.attributes)))
                             });
                         }
                     }
@@ -745,6 +756,6 @@ mod tests {
             _only_to_customer,
             _unknown,
             _deprecated,
-        ) = get_relevant_attributes(attributes);
+        ) = get_relevant_attributes(&attributes);
     }
 }
