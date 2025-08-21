@@ -5,12 +5,13 @@
 </head>
 <body>
     <h1>BGP Parser WASM Test</h1>
+    <b>only decompressed MRT files are supported at the moment</b>
     <input type="file" id="fileInput" accept=".mrt,.bz2,.gz">
     <button onclick="parseFile()">Parse File</button>
     <pre id="output"></pre>
 
     <script type="module">
-        import init, { parse_mrt_data, WasmBgpParser } from './pkg/bgpkit_parser.js';
+        import init, { parse_mrt_data, WasmBgpParser } from '../pkg/bgpkit_parser.js';
         
         await init();
         
