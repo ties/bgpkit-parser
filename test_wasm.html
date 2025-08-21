@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>BGP Parser WASM Test</title>
+</head>
+<body>
+    <h1>BGP Parser WASM Test</h1>
+    <input type="file" id="fileInput" accept=".mrt,.bz2,.gz">
+    <button onclick="parseFile()">Parse File</button>
+    <pre id="output"></pre>
+
+    <script type="module">
+        import init, { parse_mrt_data, WasmBgpParser } from './pkg/bgpkit_parser.js';
+        
+        await init();
+        
+        window.parseFile = function() {
+            const fileInput = document.getElementById('fileInput');
+            const output = document.getElementById('output');
+            
+            if (fileInput.files.length === 0) {
+                output.textContent = 'Please select a file first.';
+                return;
+            }
+            
+            const file = fileInput.files[0];
+            const reader = new FileReader();
+            
+            reader.onload = function(e) {
+                try {
+                    const data = new Uint8Array(e.target.result);
+                    
+                    // Test the simple function
+                    output.textContent = 'Parsing MRT data...';
+                    const result = parse_mrt_data(data);
+                    const parsed = JSON.parse(result);
+                    
+                    output.textContent = `Parsed ${parsed.length} BGP elements:\n` + 
+                                       JSON.stringify(parsed.slice(0, 5), null, 2) + 
+                                       (parsed.length > 5 ? '\n... and more' : '');
+                } catch (error) {
+                    output.textContent = `Error: ${error}`;
+                }
+            };
+            
+            reader.readAsArrayBuffer(file);
+        };
+
+        // Test with empty data to verify WASM loading
+        try {
+            const testData = new Uint8Array([]);
+            const parser = new WasmBgpParser(testData);
+            console.log('WASM module loaded successfully');
+            document.getElementById('output').textContent = 'WASM module loaded successfully. Select a file to test parsing.';
+        } catch (error) {
+            document.getElementById('output').textContent = `Error loading WASM: ${error}`;
+        }
+    </script>
+</body>
+</html>
