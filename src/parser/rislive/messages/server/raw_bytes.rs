@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 use crate::models::*;
 use crate::parser::bgp::parse_bgp_message;
 use crate::parser::rislive::error::ParserRisliveError;

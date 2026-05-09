@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 use itertools::Itertools;
 use serde_json::json;
 use std::io::Write;

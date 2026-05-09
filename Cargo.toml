@@ -164,6 +164,10 @@ name = "deprecated_attributes"
 required-features = ["serde"]
 
 [[example]]
+name = "selectable_parser"
+required-features = ["cli"]
+
+[[example]]
 name = "scan_mrt"
 required-features = ["cli"]
 

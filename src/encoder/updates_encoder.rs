@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 use std::net::IpAddr;
 use std::str::FromStr;
 

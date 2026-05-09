@@ -37,6 +37,8 @@ fn main() {
 }
 ```
 */
+#![allow(deprecated)]
+
 use crate::parser::rislive::error::ParserRisliveError;
 use crate::parser::rislive::messages::{RisLiveMessage, RisMessageEnum};
 

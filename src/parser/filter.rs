@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 /*!
 ## Message Filters
 
@@ -676,6 +678,48 @@ impl RouteFilterView for BgpElem {
     }
 }
 
+impl RouteFilterView for BgpSharedPathAttributeElem {
+    fn timestamp(&self) -> f64 {
+        self.timestamp
+    }
+
+    fn elem_type(&self) -> ElemType {
+        self.elem_type
+    }
+
+    fn peer_ip(&self) -> IpAddr {
+        self.peer_ip
+    }
+
+    fn peer_asn(&self) -> Asn {
+        self.peer_asn
+    }
+
+    fn prefix(&self) -> &NetworkPrefix {
+        &self.prefix
+    }
+
+    fn as_path(&self) -> Option<&AsPath> {
+        self.as_path()
+    }
+
+    fn matches_origin_asn(&self, asn: Asn) -> bool {
+        self.origin_asns()
+            .map(|origins| origins.contains(&asn))
+            .unwrap_or(false)
+    }
+
+    fn matches_community(&self, regex: &ComparableRegex) -> bool {
+        self.communities()
+            .map(|communities| communities.iter().any(|c| regex.is_match(c.to_string())))
+            .unwrap_or(false)
+    }
+
+    fn supports_community_filter(&self) -> bool {
+        true
+    }
+}
+
 impl RouteFilterView for BgpRouteElem {
     fn timestamp(&self) -> f64 {
         self.timestamp
@@ -710,6 +754,12 @@ impl RouteFilterView for BgpRouteElem {
 }
 
 impl Filterable for BgpElem {
+    fn match_filter(&self, filter: &Filter) -> bool {
+        match_route_view_filter(self, filter)
+    }
+}
+
+impl Filterable for BgpSharedPathAttributeElem {
     fn match_filter(&self, filter: &Filter) -> bool {
         match_route_view_filter(self, filter)
     }
@@ -767,6 +817,34 @@ mod tests {
         }
     }
 
+    fn shared_projection(elem: &BgpElem) -> BgpSharedPathAttributeElem {
+        BgpSharedPathAttributeElem {
+            timestamp: elem.timestamp,
+            elem_type: elem.elem_type,
+            peer_ip: elem.peer_ip,
+            peer_asn: elem.peer_asn,
+            peer_bgp_id: elem.peer_bgp_id,
+            prefix: elem.prefix,
+            path_attributes: (elem.elem_type == ElemType::ANNOUNCE).then(|| {
+                Arc::new(BgpSharedPathAttributes {
+                    next_hop: elem.next_hop,
+                    as_path: elem.as_path.clone(),
+                    origin_asns: elem.origin_asns.clone(),
+                    origin: elem.origin,
+                    local_pref: elem.local_pref,
+                    med: elem.med,
+                    communities: elem.communities.clone(),
+                    atomic: elem.atomic,
+                    aggr_asn: elem.aggr_asn,
+                    aggr_ip: elem.aggr_ip,
+                    only_to_customer: elem.only_to_customer,
+                    unknown: elem.unknown.clone(),
+                    deprecated: elem.deprecated.clone(),
+                })
+            }),
+        }
+    }
+
     #[test]
     fn test_route_community_filters_fail_closed() {
         let elem = filter_test_elem();
@@ -778,6 +856,37 @@ mod tests {
         assert!(!elem.match_filter(&negated_community));
         assert!(!route.match_filter(&community));
         assert!(!route.match_filter(&negated_community));
+    }
+
+    #[test]
+    fn test_shared_elem_filters_match_owned_elem() {
+        let elem = filter_test_elem();
+        let shared = shared_projection(&elem);
+        let filters = [
+            Filter::new("as_path", r"174 1916 52888$").unwrap(),
+            Filter::new("origin_asns", "52888").unwrap(),
+            Filter::new("community", r"12345:.*").unwrap(),
+            Filter::new("prefix", "192.168.1.0/24").unwrap(),
+            Filter::new("peer_ip", "192.168.1.1").unwrap(),
+            Filter::new("type", "a").unwrap(),
+        ];
+
+        for filter in filters {
+            assert!(elem.match_filter(&filter));
+            assert!(shared.match_filter(&filter));
+        }
+    }
+
+    #[test]
+    fn test_shared_withdraw_does_not_match_attribute_filters() {
+        let mut elem = filter_test_elem();
+        elem.elem_type = ElemType::WITHDRAW;
+        let shared = shared_projection(&elem);
+
+        assert!(!shared.match_filter(&Filter::new("as_path", r"174").unwrap()));
+        assert!(!shared.match_filter(&Filter::new("origin_asns", "52888").unwrap()));
+        assert!(!shared.match_filter(&Filter::new("community", r"12345:.*").unwrap()));
+        assert!(shared.match_filter(&Filter::new("type", "w").unwrap()));
     }
 
     #[test]

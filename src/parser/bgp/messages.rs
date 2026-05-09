@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 use crate::models::*;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use std::convert::TryFrom;
@@ -579,6 +581,16 @@ impl BgpMessage {
 
 impl From<&BgpElem> for BgpUpdateMessage {
     fn from(elem: &BgpElem) -> Self {
+        BgpUpdateMessage {
+            withdrawn_prefixes: vec![],
+            attributes: Attributes::from(elem),
+            announced_prefixes: vec![],
+        }
+    }
+}
+
+impl From<&BgpSharedPathAttributeElem> for BgpUpdateMessage {
+    fn from(elem: &BgpSharedPathAttributeElem) -> Self {
         BgpUpdateMessage {
             withdrawn_prefixes: vec![],
             attributes: Attributes::from(elem),

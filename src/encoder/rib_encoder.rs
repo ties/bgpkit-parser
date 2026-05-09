@@ -3,6 +3,7 @@
 //! `mrt_encoder` module handles serializing BGP/MRT messages back to MRT binary files. The main
 //! difficulty part of this process is the handling of TableDumpV2 RIB dumps, which requires
 //! reconstructing the peer index table before encoding all other contents.
+#![allow(deprecated)]
 
 use crate::models::{
     Attributes, BgpElem, CommonHeader, EntryType, MrtMessage, NetworkPrefix, Peer, PeerIndexTable,

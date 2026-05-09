@@ -1,6 +1,8 @@
 /*!
 parser module maintains the main logic for processing BGP and MRT messages.
 */
+#![allow(deprecated)]
+
 use std::io::Read;
 
 #[macro_use]
@@ -18,7 +20,10 @@ pub mod rislive;
 pub(crate) use self::utils::*;
 
 use crate::models::MrtRecord;
-pub use mrt::mrt_elem::{BgpUpdateElemIter, ElemError, Elementor, RecordElemIter};
+pub use mrt::mrt_elem::{
+    BgpSharedUpdateElemIter, BgpUpdateElemIter, ElemError, Elementor, RecordElemIter,
+    SharedRecordElemIter,
+};
 #[cfg(feature = "oneio")]
 use oneio::{get_cache_reader, get_reader};
 

@@ -417,7 +417,8 @@ files.par_iter().for_each(|file| {
 ### Choose the right data structure
 - Use [MrtRecord] iteration for minimal memory overhead
 - Use [MrtUpdate] for efficient batch processing without per-prefix attribute duplication
-- Use [BgpElem] for easier per-prefix analysis
+- Use [BgpSharedPathAttributeElem] for efficient per-prefix analysis with shared path attributes
+- Use [BgpElem] only for compatibility with older owned-element code
 - See [Data Representation](#data-representation) for detailed comparison
 
 # Command Line Tool
@@ -532,7 +533,7 @@ bgpkit-parser -o 13335 --filter "peer_asn!=64496" updates.bz2
 
 # Data Representation
 
-BGPKIT Parser provides three ways to access parsed BGP data: [MrtRecord], [MrtUpdate], and [BgpElem]. Choose based on your needs:
+BGPKIT Parser provides four ways to access parsed BGP data: [MrtRecord], [MrtUpdate], [BgpSharedPathAttributeElem], and [BgpElem]. Choose based on your needs:
 
 ```text
 ┌──────────────────────────────────────────────┐
@@ -542,13 +543,13 @@ BGPKIT Parser provides three ways to access parsed BGP data: [MrtRecord], [MrtUp
                        │
                        ├──> Parser
                        │
-         ┌──────────────┼────────────────┐
-         │              │                │
-         ▼              ▼                ▼
-   [MrtRecord]    [MrtUpdate]      [BgpElem]
-   (Low-level)   (Intermediate)   (High-level)
-         │             │                │
-         └─────────────┴────────────────┘
+         ┌──────────────┼────────────────┬────────────────────────────┐
+         │              │                │                            │
+         ▼              ▼                ▼                            ▼
+   [MrtRecord]    [MrtUpdate] [BgpSharedPathAttributeElem]       [BgpElem]
+   (Low-level)   (Message)       (Shared per-prefix)       (Owned compatibility)
+         │             │                │                            │
+         └─────────────┴────────────────┴────────────────────────────┘
                        │
                        ▼
               Your Analysis Code
@@ -572,7 +573,7 @@ See the [MrtRecord] documentation for the complete structure definition.
 
 ## [MrtUpdate]: Intermediate Message-Level Representation
 
-[MrtUpdate] provides access to BGP announcements without expanding them into individual per-prefix elements. This is a middle ground between [MrtRecord] and [BgpElem]. Use this when you need:
+[MrtUpdate] provides access to BGP announcements without expanding them into individual per-prefix elements. This is a middle ground between [MrtRecord] and per-prefix element iterators. Use this when you need:
 - **Efficient batch processing**: Avoid duplicating attributes across prefixes
 - **Message-level analysis**: Work with UPDATE messages or RIB entries as units
 - **Memory efficiency**: Shared attributes aren't cloned for each prefix
@@ -671,12 +672,25 @@ for update in parser.into_update_iter() {
 
 **Iteration**: Use [`BgpkitParser::into_update_iter()`] to iterate over [MrtUpdate]s.
 
-## [BgpElem]: High-level Per-Prefix Representation
+## [BgpSharedPathAttributeElem]: Shared Per-Prefix Representation
+
+[BgpSharedPathAttributeElem] provides a per-prefix view while storing BGP path attributes in an `Arc`. Announced prefixes from the same UPDATE can share one [BgpSharedPathAttributes] allocation instead of cloning AS paths, communities, and raw attributes for every prefix.
+
+Use this when you want:
+- **Per-prefix analysis**: Focus on individual prefixes without handling MRT message variants
+- **Lower memory use**: Share path attributes across prefixes from the same message
+- **BGP attributes**: Access AS path, origin ASNs, communities, next hop, local-pref, MED, and other path attributes through accessors
+
+**Iteration**: Use [`BgpkitParser::into_shared_elem_iter()`] or [`BgpkitParser::into_fallible_shared_elem_iter()`].
+
+## [BgpElem]: Owned Compatibility Representation
 
 [BgpElem] provides a simplified, per-prefix view of BGP data. Each [BgpElem] represents a single prefix announcement or withdrawal. Use this when you want:
 - **Simple analysis**: Focus on prefixes without worrying about MRT format details
 - **Format-agnostic processing**: Same structure regardless of MRT format
 - **BGP attributes**: Easy access to AS path, communities, etc.
+
+`BgpElem` is deprecated for removal after 2026-11-09. Prefer [BgpSharedPathAttributeElem] for new code. Convert with `BgpElem::from(&shared_elem)` only when an older API still requires owned fields.
 
 **Example transformation**:
 ```text
@@ -710,20 +724,22 @@ See the [BgpElem] documentation for the complete structure definition.
 - `communities`: BGP communities (standard, extended, and large)
 - `next_hop`, `local_pref`, `med`: Other BGP attributes
 
-**Iteration**: Use [`BgpkitParser::into_elem_iter()`] or default iteration to iterate over [BgpElem]s.
+**Iteration**: Use [`BgpkitParser::into_elem_iter()`] or default iteration to iterate over [BgpElem]s during the compatibility window.
 
 ## Which One Should I Use?
 
 | Use Case | Recommended | Why |
 |----------|-------------|-----|
-| Simple prefix analysis | [BgpElem] | Easy per-prefix access, format-agnostic |
-| High-performance processing | [MrtUpdate] | Avoids attribute duplication overhead |
+| Simple prefix analysis | [BgpSharedPathAttributeElem] | Per-prefix access without cloning shared path attributes |
+| High-performance message processing | [MrtUpdate] | Avoids per-prefix expansion entirely |
 | Counting prefixes per UPDATE | [MrtUpdate] | Direct access to message structure |
+| Older owned-field integrations | [BgpElem] | Compatibility during the deprecation window |
 | Re-encoding MRT data | [MrtRecord] | Preserves complete MRT structure |
 | MRT format-specific details | [MrtRecord] | Access to peer index tables, geo-location, etc. |
 
 **Memory trade-off**:
-- [BgpElem] duplicates shared attributes (AS path, communities) for each prefix
+- [BgpSharedPathAttributeElem] shares path attributes across prefixes with `Arc`
+- [BgpElem] duplicates shared attributes (AS path, communities) for each prefix and is deprecated
 - [MrtUpdate] keeps attributes shared within each message/entry
 - [MrtRecord] has minimal overhead but requires more code to extract BGP data
 
@@ -838,8 +854,9 @@ pub mod parser;
 #[cfg(feature = "wasm")]
 pub mod wasm;
 
-pub use models::BgpElem;
 pub use models::BgpRouteElem;
 pub use models::MrtRecord;
+#[allow(deprecated)]
+pub use models::{BgpElem, BgpSharedPathAttributeElem, BgpSharedPathAttributes};
 #[cfg(feature = "parser")]
 pub use parser::*;

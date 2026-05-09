@@ -21,6 +21,8 @@
 //! - [`resetMrtParser`](reset_mrt_parser) — reset MRT parser state between files
 //! - [`parseBgpUpdate`](parse_bgp_update) — parse a single BGP UPDATE message
 
+#![allow(deprecated)]
+
 use crate::models::*;
 use crate::parser::bgp::messages::parse_bgp_message;
 use crate::parser::bmp::error::ParserBmpError;

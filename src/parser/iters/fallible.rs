@@ -5,6 +5,7 @@ These iterators complement the default iterators by returning `Result<T, ParserE
 instead of silently skipping errors. This allows users to handle errors explicitly while
 maintaining backward compatibility with existing code.
 */
+#![allow(deprecated)]
 use crate::error::{ParserError, ParserErrorWithBytes};
 use crate::models::*;
 use crate::parser::BgpkitParser;
@@ -75,6 +76,10 @@ impl<R: Read> Iterator for FallibleRecordIterator<R> {
 ///
 /// Unlike the default `ElemIterator`, this iterator returns `Result<BgpElem, ParserErrorWithBytes>`
 /// for each successfully parsed element, and surfaces any parsing errors encountered.
+#[deprecated(
+    since = "0.16.0",
+    note = "use FallibleSharedElemIterator via BgpkitParser::into_fallible_shared_elem_iter; owned BgpElem removal is planned after 2026-11-09"
+)]
 pub struct FallibleElemIterator<R> {
     cache_elems: Vec<BgpElem>,
     record_iter: FallibleRecordIterator<R>,
@@ -118,6 +123,54 @@ impl<R: Read> Iterator for FallibleElemIterator<R> {
                         continue;
                     }
                     // Reverse to maintain order when popping
+                    elems.reverse();
+                    self.cache_elems = elems;
+                    continue;
+                }
+            }
+        }
+    }
+}
+
+/// Fallible iterator over shared BGP elements that returns parsing errors.
+pub struct FallibleSharedElemIterator<R> {
+    cache_elems: Vec<BgpSharedPathAttributeElem>,
+    record_iter: FallibleRecordIterator<R>,
+    elementor: Elementor,
+}
+
+impl<R> FallibleSharedElemIterator<R> {
+    pub(crate) fn new(parser: BgpkitParser<R>) -> Self {
+        FallibleSharedElemIterator {
+            record_iter: FallibleRecordIterator::new(parser),
+            cache_elems: vec![],
+            elementor: Elementor::new(),
+        }
+    }
+}
+
+impl<R: Read> Iterator for FallibleSharedElemIterator<R> {
+    type Item = Result<BgpSharedPathAttributeElem, ParserErrorWithBytes>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if !self.cache_elems.is_empty() {
+                if let Some(elem) = self.cache_elems.pop() {
+                    if elem.match_filters(&self.record_iter.parser.filters) {
+                        return Some(Ok(elem));
+                    }
+                    continue;
+                }
+            }
+
+            match self.record_iter.next() {
+                None => return None,
+                Some(Err(e)) => return Some(Err(e)),
+                Some(Ok(record)) => {
+                    let mut elems = self.elementor.record_to_shared_elems(record);
+                    if elems.is_empty() {
+                        continue;
+                    }
                     elems.reverse();
                     self.cache_elems = elems;
                     continue;

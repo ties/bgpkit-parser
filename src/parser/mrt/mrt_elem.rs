@@ -1,4 +1,5 @@
 #![allow(unused)]
+#![allow(deprecated)]
 //! This module handles converting MRT records into individual per-prefix BGP elements.
 //!
 //! Each MRT record may contain reachability information for multiple prefixes. This module breaks
@@ -13,6 +14,7 @@ use log::{error, warn};
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::net::{IpAddr, Ipv4Addr};
+use std::sync::Arc;
 
 #[derive(Default, Debug, Clone)]
 pub struct Elementor {
@@ -198,6 +200,58 @@ fn get_relevant_attributes(
     )
 }
 
+fn get_shared_path_attributes(
+    attributes: Attributes,
+) -> (Arc<BgpSharedPathAttributes>, Option<Nlri>, Option<Nlri>) {
+    let (
+        as_path,
+        as4_path,
+        origin,
+        next_hop,
+        local_pref,
+        med,
+        communities,
+        atomic,
+        aggregator,
+        announced,
+        withdrawn,
+        only_to_customer,
+        unknown,
+        deprecated,
+    ) = get_relevant_attributes(attributes);
+
+    let path = match (as_path, as4_path) {
+        (None, None) => None,
+        (Some(v), None) => Some(v),
+        (None, Some(v)) => Some(v),
+        (Some(v1), Some(v2)) => Some(AsPath::merge_aspath_as4path(&v1, &v2)),
+    };
+
+    let origin_asns = path
+        .as_ref()
+        .map(|as_path| as_path.iter_origins().collect());
+
+    (
+        Arc::new(BgpSharedPathAttributes {
+            next_hop,
+            as_path: path,
+            origin_asns,
+            origin,
+            local_pref,
+            med,
+            communities,
+            atomic,
+            aggr_asn: aggregator.as_ref().map(|v| v.0),
+            aggr_ip: aggregator.as_ref().map(|v| v.1),
+            only_to_customer,
+            unknown,
+            deprecated,
+        }),
+        announced,
+        withdrawn,
+    )
+}
+
 fn rib_entry_to_elem(prefix: NetworkPrefix, peer: &Peer, entry: RibEntry) -> BgpElem {
     let (
         as_path,
@@ -263,6 +317,44 @@ fn rib_entry_to_elem(prefix: NetworkPrefix, peer: &Peer, entry: RibEntry) -> Bgp
     }
 }
 
+fn rib_entry_to_shared_elem(
+    prefix: NetworkPrefix,
+    peer: &Peer,
+    entry: RibEntry,
+) -> BgpSharedPathAttributeElem {
+    let (path_attributes, announced, _withdrawn) = get_shared_path_attributes(entry.attributes);
+    let next_hop = match path_attributes.next_hop {
+        Some(v) => Some(v),
+        None => announced.and_then(|v| {
+            v.next_hop.map(|h| match h {
+                NextHopAddress::Ipv4(v) => IpAddr::from(v),
+                NextHopAddress::Ipv6(v) => IpAddr::from(v),
+                NextHopAddress::Ipv6LinkLocal(v, _) => IpAddr::from(v),
+                NextHopAddress::VpnIpv6(_, v) => IpAddr::from(v),
+                NextHopAddress::VpnIpv6LinkLocal(_, v, _, _) => IpAddr::from(v),
+            })
+        }),
+    };
+
+    let path_attributes = if next_hop == path_attributes.next_hop {
+        path_attributes
+    } else {
+        let mut attrs = (*path_attributes).clone();
+        attrs.next_hop = next_hop;
+        Arc::new(attrs)
+    };
+
+    BgpSharedPathAttributeElem {
+        timestamp: entry.originated_time as f64,
+        elem_type: ElemType::ANNOUNCE,
+        peer_ip: peer.peer_ip,
+        peer_asn: peer.peer_asn,
+        peer_bgp_id: Some(peer.peer_bgp_id),
+        prefix,
+        path_attributes: Some(path_attributes),
+    }
+}
+
 /// Iterator over [`BgpElem`]s produced from a single [`MrtRecord`],
 /// without requiring a mutable reference to the [`Elementor`].
 ///
@@ -281,6 +373,23 @@ pub enum RecordElemIter<'a> {
     },
     #[doc(hidden)]
     Bgp4Mp(BgpUpdateElemIter),
+}
+
+/// Iterator over [`BgpSharedPathAttributeElem`]s produced from a single
+/// [`MrtRecord`].
+pub enum SharedRecordElemIter<'a> {
+    #[doc(hidden)]
+    Empty,
+    #[doc(hidden)]
+    TableDump(Option<BgpSharedPathAttributeElem>),
+    #[doc(hidden)]
+    RibAfi {
+        peer_table: &'a PeerIndexTable,
+        prefix: NetworkPrefix,
+        entries: std::vec::IntoIter<RibEntry>,
+    },
+    #[doc(hidden)]
+    Bgp4Mp(BgpSharedUpdateElemIter),
 }
 
 impl Iterator for RecordElemIter<'_> {
@@ -326,9 +435,56 @@ impl Iterator for RecordElemIter<'_> {
     }
 }
 
+impl Iterator for SharedRecordElemIter<'_> {
+    type Item = BgpSharedPathAttributeElem;
+
+    fn next(&mut self) -> Option<BgpSharedPathAttributeElem> {
+        match self {
+            SharedRecordElemIter::Empty => None,
+            SharedRecordElemIter::TableDump(elem) => elem.take(),
+            SharedRecordElemIter::Bgp4Mp(iter) => iter.next(),
+            SharedRecordElemIter::RibAfi {
+                peer_table,
+                prefix,
+                entries,
+            } => {
+                let entry = entries.next()?;
+                let pid = entry.peer_index;
+                match peer_table.get_peer_by_id(&pid) {
+                    Some(peer) => Some(rib_entry_to_shared_elem(*prefix, peer, entry)),
+                    None => {
+                        error!("peer ID {} not found in peer_index table", pid);
+                        *self = SharedRecordElemIter::Empty;
+                        None
+                    }
+                }
+            }
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match self {
+            SharedRecordElemIter::Empty => (0, Some(0)),
+            SharedRecordElemIter::TableDump(elem) => {
+                let n = elem.is_some() as usize;
+                (n, Some(n))
+            }
+            SharedRecordElemIter::Bgp4Mp(iter) => iter.size_hint(),
+            SharedRecordElemIter::RibAfi { entries, .. } => {
+                let len = entries.len();
+                (len, Some(len))
+            }
+        }
+    }
+}
+
 /// Iterator over [`BgpElem`]s produced from a [`BgpUpdateMessage`],
 /// avoiding allocation by lazily yielding elements from announced and
 /// withdrawn prefixes in two phases.
+#[deprecated(
+    since = "0.16.0",
+    note = "use BgpSharedUpdateElemIter; owned BgpElem removal is planned after 2026-11-09"
+)]
 pub struct BgpUpdateElemIter {
     timestamp: f64,
     peer_ip: IpAddr,
@@ -349,6 +505,21 @@ pub struct BgpUpdateElemIter {
     unknown: Option<Vec<AttrRaw>>,
     deprecated: Option<Vec<AttrRaw>>,
     // Prefix iterators (two chained sources each)
+    announced:
+        std::iter::Chain<std::vec::IntoIter<NetworkPrefix>, std::vec::IntoIter<NetworkPrefix>>,
+    withdrawn:
+        std::iter::Chain<std::vec::IntoIter<NetworkPrefix>, std::vec::IntoIter<NetworkPrefix>>,
+    in_withdrawn_phase: bool,
+}
+
+/// Iterator over [`BgpSharedPathAttributeElem`]s produced from a
+/// [`BgpUpdateMessage`].
+pub struct BgpSharedUpdateElemIter {
+    timestamp: f64,
+    peer_ip: IpAddr,
+    peer_asn: Asn,
+    peer_bgp_id: Option<BgpIdentifier>,
+    path_attributes: Arc<BgpSharedPathAttributes>,
     announced:
         std::iter::Chain<std::vec::IntoIter<NetworkPrefix>, std::vec::IntoIter<NetworkPrefix>>,
     withdrawn:
@@ -421,6 +592,44 @@ impl Iterator for BgpUpdateElemIter {
     }
 }
 
+impl Iterator for BgpSharedUpdateElemIter {
+    type Item = BgpSharedPathAttributeElem;
+
+    fn next(&mut self) -> Option<BgpSharedPathAttributeElem> {
+        if !self.in_withdrawn_phase {
+            if let Some(prefix) = self.announced.next() {
+                return Some(BgpSharedPathAttributeElem {
+                    timestamp: self.timestamp,
+                    elem_type: ElemType::ANNOUNCE,
+                    peer_ip: self.peer_ip,
+                    peer_asn: self.peer_asn,
+                    peer_bgp_id: self.peer_bgp_id,
+                    prefix,
+                    path_attributes: Some(Arc::clone(&self.path_attributes)),
+                });
+            }
+            self.in_withdrawn_phase = true;
+        }
+
+        self.withdrawn
+            .next()
+            .map(|prefix| BgpSharedPathAttributeElem {
+                timestamp: self.timestamp,
+                elem_type: ElemType::WITHDRAW,
+                peer_ip: self.peer_ip,
+                peer_asn: self.peer_asn,
+                peer_bgp_id: self.peer_bgp_id,
+                prefix,
+                path_attributes: None,
+            })
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let len = self.announced.size_hint().0 + self.withdrawn.size_hint().0;
+        (len, Some(len))
+    }
+}
+
 impl Elementor {
     pub fn new() -> Elementor {
         Self::default()
@@ -488,6 +697,10 @@ impl Elementor {
     ///
     /// - [`ElemError::UnexpectedPeerIndexTable`] if the record is a PeerIndexTable message.
     /// - [`ElemError::MissingPeerTable`] if the record requires a peer table but none is set.
+    #[deprecated(
+        since = "0.16.0",
+        note = "use record_to_shared_elems_iter; owned BgpElem removal is planned after 2026-11-09"
+    )]
     pub fn record_to_elems_iter(&self, record: MrtRecord) -> Result<RecordElemIter<'_>, ElemError> {
         let timestamp = {
             let t = record.common_header.timestamp;
@@ -581,10 +794,84 @@ impl Elementor {
         }
     }
 
+    /// Convert a [`MrtRecord`] into an iterator of
+    /// [`BgpSharedPathAttributeElem`]s without requiring `&mut self`.
+    pub fn record_to_shared_elems_iter(
+        &self,
+        record: MrtRecord,
+    ) -> Result<SharedRecordElemIter<'_>, ElemError> {
+        let timestamp = {
+            let t = record.common_header.timestamp;
+            if let Some(micro) = &record.common_header.microsecond_timestamp {
+                let m = (*micro as f64) / 1000000.0;
+                t as f64 + m
+            } else {
+                f64::from(t)
+            }
+        };
+
+        match record.message {
+            MrtMessage::TableDumpMessage(msg) => {
+                let (path_attributes, _announced, _withdrawn) =
+                    get_shared_path_attributes(msg.attributes);
+
+                Ok(SharedRecordElemIter::TableDump(Some(
+                    BgpSharedPathAttributeElem {
+                        timestamp: msg.originated_time as f64,
+                        elem_type: ElemType::ANNOUNCE,
+                        peer_ip: msg.peer_ip,
+                        peer_asn: msg.peer_asn,
+                        peer_bgp_id: None,
+                        prefix: msg.prefix,
+                        path_attributes: Some(path_attributes),
+                    },
+                )))
+            }
+
+            MrtMessage::TableDumpV2Message(msg) => match msg {
+                TableDumpV2Message::PeerIndexTable(p) => {
+                    Err(ElemError::UnexpectedPeerIndexTable(Box::new(p)))
+                }
+                TableDumpV2Message::RibAfi(t) => {
+                    let peer_table = self
+                        .peer_table
+                        .as_ref()
+                        .ok_or(ElemError::MissingPeerTable)?;
+                    Ok(SharedRecordElemIter::RibAfi {
+                        peer_table,
+                        prefix: t.prefix,
+                        entries: t.rib_entries.into_iter(),
+                    })
+                }
+                TableDumpV2Message::RibGeneric(_) => Err(ElemError::UnsupportedRibGeneric),
+                TableDumpV2Message::GeoPeerTable(_) => Ok(SharedRecordElemIter::Empty),
+            },
+
+            MrtMessage::Bgp4Mp(msg) => match msg {
+                Bgp4MpEnum::StateChange(_) => Ok(SharedRecordElemIter::Empty),
+                Bgp4MpEnum::Message(v) => {
+                    match Elementor::bgp_to_shared_elems_iter(
+                        v.bgp_message,
+                        timestamp,
+                        &v.peer_ip,
+                        &v.peer_asn,
+                    ) {
+                        Some(iter) => Ok(SharedRecordElemIter::Bgp4Mp(iter)),
+                        None => Ok(SharedRecordElemIter::Empty),
+                    }
+                }
+            },
+        }
+    }
+
     /// Convert a [BgpMessage] to a vector of [BgpElem]s.
     ///
     /// A [BgpMessage] may include `Update`, `Open`, `Notification` or `KeepAlive` messages,
     /// and only `Update` message contains [BgpElem]s.
+    #[deprecated(
+        since = "0.16.0",
+        note = "use bgp_to_shared_elems; owned BgpElem removal is planned after 2026-11-09"
+    )]
     pub fn bgp_to_elems(
         msg: BgpMessage,
         timestamp: f64,
@@ -599,6 +886,10 @@ impl Elementor {
     /// Convert a [BgpMessage] into an iterator of [BgpElem]s.
     ///
     /// Returns `None` for non-Update messages (Open, Notification, KeepAlive).
+    #[deprecated(
+        since = "0.16.0",
+        note = "use bgp_to_shared_elems_iter; owned BgpElem removal is planned after 2026-11-09"
+    )]
     pub fn bgp_to_elems_iter(
         msg: BgpMessage,
         timestamp: f64,
@@ -613,7 +904,38 @@ impl Elementor {
         }
     }
 
+    /// Convert a [BgpMessage] to shared BGP elements.
+    pub fn bgp_to_shared_elems(
+        msg: BgpMessage,
+        timestamp: f64,
+        peer_ip: &IpAddr,
+        peer_asn: &Asn,
+    ) -> Vec<BgpSharedPathAttributeElem> {
+        Elementor::bgp_to_shared_elems_iter(msg, timestamp, peer_ip, peer_asn)
+            .map(|iter| iter.collect())
+            .unwrap_or_default()
+    }
+
+    /// Convert a [BgpMessage] into an iterator of shared BGP elements.
+    pub fn bgp_to_shared_elems_iter(
+        msg: BgpMessage,
+        timestamp: f64,
+        peer_ip: &IpAddr,
+        peer_asn: &Asn,
+    ) -> Option<BgpSharedUpdateElemIter> {
+        match msg {
+            BgpMessage::Update(msg) => Some(Elementor::bgp_update_to_shared_elems_iter(
+                msg, timestamp, peer_ip, peer_asn,
+            )),
+            BgpMessage::Open(_) | BgpMessage::Notification(_) | BgpMessage::KeepAlive => None,
+        }
+    }
+
     /// Convert a [BgpUpdateMessage] to a vector of [BgpElem]s.
+    #[deprecated(
+        since = "0.16.0",
+        note = "use bgp_update_to_shared_elems; owned BgpElem removal is planned after 2026-11-09"
+    )]
     pub fn bgp_update_to_elems(
         msg: BgpUpdateMessage,
         timestamp: f64,
@@ -625,6 +947,10 @@ impl Elementor {
 
     /// Convert a [BgpUpdateMessage] into a [`BgpUpdateElemIter`] that lazily
     /// yields [BgpElem]s without allocating a `Vec`.
+    #[deprecated(
+        since = "0.16.0",
+        note = "use bgp_update_to_shared_elems_iter; owned BgpElem removal is planned after 2026-11-09"
+    )]
     pub fn bgp_update_to_elems_iter(
         msg: BgpUpdateMessage,
         timestamp: f64,
@@ -686,6 +1012,40 @@ impl Elementor {
         }
     }
 
+    /// Convert a [BgpUpdateMessage] to shared BGP elements.
+    pub fn bgp_update_to_shared_elems(
+        msg: BgpUpdateMessage,
+        timestamp: f64,
+        peer_ip: &IpAddr,
+        peer_asn: &Asn,
+    ) -> Vec<BgpSharedPathAttributeElem> {
+        Elementor::bgp_update_to_shared_elems_iter(msg, timestamp, peer_ip, peer_asn).collect()
+    }
+
+    /// Convert a [BgpUpdateMessage] into a shared element iterator.
+    pub fn bgp_update_to_shared_elems_iter(
+        msg: BgpUpdateMessage,
+        timestamp: f64,
+        peer_ip: &IpAddr,
+        peer_asn: &Asn,
+    ) -> BgpSharedUpdateElemIter {
+        let (path_attributes, announced, withdrawn) = get_shared_path_attributes(msg.attributes);
+
+        let nlri_announced = announced.map(|n| n.prefixes).unwrap_or_default();
+        let nlri_withdrawn = withdrawn.map(|n| n.prefixes).unwrap_or_default();
+
+        BgpSharedUpdateElemIter {
+            timestamp,
+            peer_ip: *peer_ip,
+            peer_asn: *peer_asn,
+            peer_bgp_id: None,
+            path_attributes,
+            announced: msg.announced_prefixes.into_iter().chain(nlri_announced),
+            withdrawn: msg.withdrawn_prefixes.into_iter().chain(nlri_withdrawn),
+            in_withdrawn_phase: false,
+        }
+    }
+
     /// Convert a [MrtRecord] to a vector of [BgpElem]s.
     ///
     /// If the record is a [`PeerIndexTable`], it is consumed to set the internal
@@ -693,6 +1053,10 @@ impl Elementor {
     ///
     /// For a non-mutating, lazy alternative, see
     /// [`record_to_elems_iter`](Elementor::record_to_elems_iter).
+    #[deprecated(
+        since = "0.16.0",
+        note = "use record_to_shared_elems; owned BgpElem removal is planned after 2026-11-09"
+    )]
     pub fn record_to_elems(&mut self, record: MrtRecord) -> Vec<BgpElem> {
         match record.message {
             MrtMessage::TableDumpV2Message(TableDumpV2Message::PeerIndexTable(_)) => {
@@ -700,6 +1064,26 @@ impl Elementor {
                 vec![]
             }
             _ => match self.record_to_elems_iter(record) {
+                Ok(iter) => iter.collect(),
+                Err(e) => {
+                    error!("{}", e);
+                    vec![]
+                }
+            },
+        }
+    }
+
+    /// Convert a [MrtRecord] to shared BGP elements.
+    ///
+    /// If the record is a [`PeerIndexTable`], it is consumed to set the internal
+    /// peer table. Errors are logged.
+    pub fn record_to_shared_elems(&mut self, record: MrtRecord) -> Vec<BgpSharedPathAttributeElem> {
+        match record.message {
+            MrtMessage::TableDumpV2Message(TableDumpV2Message::PeerIndexTable(_)) => {
+                self.set_peer_table(record);
+                vec![]
+            }
+            _ => match self.record_to_shared_elems_iter(record) {
                 Ok(iter) => iter.collect(),
                 Err(e) => {
                     error!("{}", e);
@@ -818,6 +1202,109 @@ impl From<&BgpElem> for Attributes {
         }
 
         if let Some(v) = value.deprecated.as_ref() {
+            for t in v {
+                values.push(AttributeValue::Deprecated(t.clone()));
+            }
+        }
+
+        attributes.extend(values);
+        attributes
+    }
+}
+
+impl From<&BgpSharedPathAttributeElem> for Attributes {
+    fn from(value: &BgpSharedPathAttributeElem) -> Self {
+        let mut values = Vec::<AttributeValue>::new();
+        let mut attributes = Attributes::default();
+        let prefix = value.prefix;
+
+        if value.elem_type == ElemType::WITHDRAW {
+            values.push(AttributeValue::MpUnreachNlri(Nlri::new_unreachable(prefix)));
+            attributes.extend(values);
+            return attributes;
+        }
+
+        values.push(AttributeValue::MpReachNlri(Nlri::new_reachable(
+            prefix,
+            value.next_hop(),
+        )));
+
+        if let Some(v) = value.next_hop() {
+            values.push(AttributeValue::NextHop(v));
+        }
+
+        if let Some(v) = value.as_path() {
+            let is_as4 = match v.get_origin_opt() {
+                None => true,
+                Some(asn) => asn.is_four_byte(),
+            };
+            values.push(AttributeValue::AsPath {
+                path: v.clone(),
+                is_as4,
+            });
+        }
+
+        if let Some(v) = value.origin() {
+            values.push(AttributeValue::Origin(v));
+        }
+
+        if let Some(v) = value.local_pref() {
+            values.push(AttributeValue::LocalPreference(v));
+        }
+
+        if let Some(v) = value.med() {
+            values.push(AttributeValue::MultiExitDiscriminator(v));
+        }
+
+        if let Some(v) = value.communities() {
+            let mut communites = vec![];
+            let mut extended_communities = vec![];
+            let mut ipv6_extended_communities = vec![];
+            let mut large_communities = vec![];
+            for c in v {
+                match c {
+                    MetaCommunity::Plain(v) => communites.push(*v),
+                    MetaCommunity::Extended(v) => extended_communities.push(*v),
+                    MetaCommunity::Large(v) => large_communities.push(*v),
+                    MetaCommunity::Ipv6Extended(v) => ipv6_extended_communities.push(*v),
+                }
+            }
+            if !communites.is_empty() {
+                values.push(AttributeValue::Communities(communites));
+            }
+            if !extended_communities.is_empty() {
+                values.push(AttributeValue::ExtendedCommunities(extended_communities));
+            }
+            if !large_communities.is_empty() {
+                values.push(AttributeValue::LargeCommunities(large_communities));
+            }
+            if !ipv6_extended_communities.is_empty() {
+                values.push(AttributeValue::Ipv6AddressSpecificExtendedCommunities(
+                    ipv6_extended_communities,
+                ));
+            }
+        }
+
+        if let Some(v) = value.aggr_asn() {
+            let aggregator_id = value.aggr_ip().unwrap_or(Ipv4Addr::UNSPECIFIED);
+            values.push(AttributeValue::Aggregator {
+                asn: v,
+                id: aggregator_id,
+                is_as4: v.is_four_byte(),
+            });
+        }
+
+        if let Some(v) = value.only_to_customer() {
+            values.push(AttributeValue::OnlyToCustomer(v));
+        }
+
+        if let Some(v) = value.unknown() {
+            for t in v {
+                values.push(AttributeValue::Unknown(t.clone()));
+            }
+        }
+
+        if let Some(v) = value.deprecated() {
             for t in v {
                 values.push(AttributeValue::Deprecated(t.clone()));
             }
@@ -1282,6 +1769,48 @@ mod tests {
             Elementor::bgp_update_to_elems_iter(update, timestamp, &peer_ip, &peer_asn).collect();
         assert_eq!(elems_vec, elems_iter);
         assert_eq!(elems_vec.len(), 2);
+    }
+
+    #[test]
+    fn test_bgp_update_to_shared_elems_share_attributes() {
+        let timestamp = 0.0;
+        let peer_ip = IpAddr::from_str("10.0.0.1").unwrap();
+        let peer_asn = Asn::new_32bit(65000);
+
+        let attributes = vec![
+            AttributeValue::Origin(Origin::IGP),
+            AttributeValue::AsPath {
+                path: AsPath::from_sequence([65000, 65001, 65002]),
+                is_as4: false,
+            },
+            AttributeValue::NextHop(peer_ip),
+            AttributeValue::Communities(vec![Community::NoAdvertise]),
+        ]
+        .into_iter()
+        .map(Attribute::from)
+        .collect::<Vec<Attribute>>();
+        let attributes = Attributes::from(attributes);
+
+        let update = BgpUpdateMessage {
+            attributes,
+            announced_prefixes: vec![
+                NetworkPrefix::from_str("10.0.0.0/24").unwrap(),
+                NetworkPrefix::from_str("10.0.1.0/24").unwrap(),
+            ],
+            withdrawn_prefixes: vec![NetworkPrefix::from_str("10.0.2.0/24").unwrap()],
+        };
+
+        let owned = Elementor::bgp_update_to_elems(update.clone(), timestamp, &peer_ip, &peer_asn);
+        let shared = Elementor::bgp_update_to_shared_elems(update, timestamp, &peer_ip, &peer_asn);
+
+        assert_eq!(shared.len(), 3);
+        let first_attrs = shared[0].path_attributes.as_ref().unwrap();
+        let second_attrs = shared[1].path_attributes.as_ref().unwrap();
+        assert!(Arc::ptr_eq(first_attrs, second_attrs));
+        assert!(shared[2].path_attributes.is_none());
+
+        let converted = shared.iter().map(BgpElem::from).collect::<Vec<_>>();
+        assert_eq!(owned, converted);
     }
 
     #[test]

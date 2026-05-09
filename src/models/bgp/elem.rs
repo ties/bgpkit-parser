@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 use crate::models::*;
 use itertools::Itertools;
 use std::cmp::Ordering;
@@ -6,7 +8,7 @@ use std::net::IpAddr;
 use std::str::FromStr;
 use std::sync::Arc;
 
-// TODO(jmeggitt): BgpElem can be converted to an enum. Apply this change during performance PR.
+// TODO(jmeggitt): Remove BgpElem after the shared element migration window.
 
 /// # ElemType
 ///
@@ -70,6 +72,70 @@ impl ElemType {
     }
 }
 
+/// BGP path attributes shared by all announced prefixes in one message.
+///
+/// This structure is intended to be stored behind an [`Arc`] by
+/// [`BgpSharedPathAttributeElem`], avoiding deep clones of AS paths,
+/// communities, and raw attributes when a BGP UPDATE announces multiple
+/// prefixes with the same path attributes.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct BgpSharedPathAttributes {
+    /// The next hop IP address for the item, if available.
+    pub next_hop: Option<IpAddr>,
+    /// The optional AS path representation.
+    pub as_path: Option<AsPath>,
+    /// The origin ASNs associated with the path, if available.
+    pub origin_asns: Option<Vec<Asn>>,
+    /// The origin of the path (IGP, EGP, INCOMPLETE), if known.
+    pub origin: Option<Origin>,
+    /// The local preference, if available.
+    pub local_pref: Option<u32>,
+    /// The multi-exit discriminator value, if available.
+    pub med: Option<u32>,
+    /// The BGP communities, if any.
+    pub communities: Option<Vec<MetaCommunity>>,
+    /// Indicates whether the path is atomic aggregate.
+    pub atomic: bool,
+    /// The aggregated ASN, if available.
+    pub aggr_asn: Option<Asn>,
+    /// The aggregated BGP identifier, if available.
+    pub aggr_ip: Option<BgpIdentifier>,
+    /// The Only-To-Customer ASN, if available.
+    pub only_to_customer: Option<Asn>,
+    /// Unknown attributes formatted as (TYPE, RAW_BYTES).
+    pub unknown: Option<Vec<AttrRaw>>,
+    /// Deprecated attributes formatted as (TYPE, RAW_BYTES).
+    pub deprecated: Option<Vec<AttrRaw>>,
+}
+
+/// Per-prefix BGP element with path attributes shared through [`Arc`].
+///
+/// Announcements from the same BGP UPDATE or RIB entry can point to the same
+/// [`BgpSharedPathAttributes`] allocation. Withdrawals carry no path
+/// attributes and set `path_attributes` to `None`.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct BgpSharedPathAttributeElem {
+    /// The timestamp of the item in floating-point format.
+    pub timestamp: f64,
+    /// The element type of an item.
+    #[cfg_attr(feature = "serde", serde(rename = "type"))]
+    pub elem_type: ElemType,
+    /// The IP address of the peer associated with the item.
+    pub peer_ip: IpAddr,
+    /// The peer ASN of the item.
+    pub peer_asn: Asn,
+    /// The BGP Identifier (Router ID) of the peer, if available.
+    pub peer_bgp_id: Option<BgpIdentifier>,
+    /// The network prefix of the item.
+    pub prefix: NetworkPrefix,
+    /// Shared BGP path attributes for announcements.
+    pub path_attributes: Option<Arc<BgpSharedPathAttributes>>,
+}
+
+impl Eq for BgpSharedPathAttributeElem {}
+
 /// BgpElem represents a per-prefix BGP element.
 ///
 /// This struct contains information about an announced/withdrawn prefix.
@@ -96,6 +162,10 @@ impl ElemType {
 ///
 /// Note: Constructing BGP elements consumes more memory due to duplicate information
 /// shared between multiple elements of one MRT record.
+#[deprecated(
+    since = "0.16.0",
+    note = "use BgpSharedPathAttributeElem and shared element iterators; owned BgpElem removal is planned after 2026-11-09"
+)]
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct BgpElem {
@@ -188,6 +258,12 @@ impl Eq for BgpElem {}
 
 impl Eq for BgpRouteElem {}
 
+impl PartialOrd<Self> for BgpSharedPathAttributeElem {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 impl PartialOrd<Self> for BgpElem {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
@@ -197,6 +273,15 @@ impl PartialOrd<Self> for BgpElem {
 impl PartialOrd<Self> for BgpRouteElem {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
+    }
+}
+
+impl Ord for BgpSharedPathAttributeElem {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.timestamp
+            .partial_cmp(&other.timestamp)
+            .unwrap()
+            .then_with(|| self.peer_ip.cmp(&other.peer_ip))
     }
 }
 
@@ -215,6 +300,23 @@ impl Ord for BgpRouteElem {
             .partial_cmp(&other.timestamp)
             .unwrap()
             .then_with(|| self.peer_ip.cmp(&other.peer_ip))
+    }
+}
+
+impl Default for BgpSharedPathAttributeElem {
+    fn default() -> Self {
+        Self {
+            timestamp: 0.0,
+            elem_type: ElemType::ANNOUNCE,
+            peer_ip: IpAddr::from_str("0.0.0.0").unwrap(),
+            peer_asn: 0.into(),
+            peer_bgp_id: None,
+            prefix: NetworkPrefix::from_str("0.0.0.0/0").unwrap(),
+            path_attributes: Some(Arc::new(BgpSharedPathAttributes {
+                next_hop: Some(IpAddr::from_str("0.0.0.0").unwrap()),
+                ..Default::default()
+            })),
+        }
     }
 }
 
@@ -297,6 +399,53 @@ pub fn option_to_string_communities(o: &Option<Vec<MetaCommunity>>) -> String {
     }
 }
 
+#[inline(always)]
+fn option_to_string_communities_ref(o: Option<&Vec<MetaCommunity>>) -> String {
+    if let Some(v) = o {
+        v.iter().join(" ")
+    } else {
+        String::new()
+    }
+}
+
+impl Display for BgpSharedPathAttributeElem {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let t = match self.elem_type {
+            ElemType::ANNOUNCE => "A",
+            ElemType::WITHDRAW => "W",
+        };
+        let attrs = self.path_attributes.as_deref();
+        let as_path = attrs.and_then(|a| a.as_path.as_ref());
+        let origin = attrs.and_then(|a| a.origin);
+        let next_hop = attrs.and_then(|a| a.next_hop);
+        let local_pref = attrs.and_then(|a| a.local_pref);
+        let med = attrs.and_then(|a| a.med);
+        let communities = attrs.and_then(|a| a.communities.as_ref());
+        let atomic = attrs.map(|a| a.atomic).unwrap_or(false);
+        let aggr_asn = attrs.and_then(|a| a.aggr_asn);
+        let aggr_ip = attrs.and_then(|a| a.aggr_ip);
+
+        write!(
+            f,
+            "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+            t,
+            &self.timestamp,
+            &self.peer_ip,
+            &self.peer_asn,
+            &self.prefix,
+            OptionToStr(&as_path),
+            OptionToStr(&origin),
+            OptionToStr(&next_hop),
+            OptionToStr(&local_pref),
+            OptionToStr(&med),
+            option_to_string_communities_ref(communities),
+            atomic,
+            OptionToStr(&aggr_asn),
+            OptionToStr(&aggr_ip),
+        )
+    }
+}
+
 impl Display for BgpElem {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let t = match self.elem_type {
@@ -343,6 +492,128 @@ impl Display for BgpRouteElem {
     }
 }
 
+impl BgpSharedPathAttributeElem {
+    /// Returns true if the element is an announcement.
+    pub fn is_announcement(&self) -> bool {
+        self.elem_type == ElemType::ANNOUNCE
+    }
+
+    /// Returns shared path attributes for announcements.
+    pub fn path_attributes(&self) -> Option<&BgpSharedPathAttributes> {
+        self.path_attributes.as_deref()
+    }
+
+    pub fn next_hop(&self) -> Option<IpAddr> {
+        self.path_attributes().and_then(|a| a.next_hop)
+    }
+
+    pub fn as_path(&self) -> Option<&AsPath> {
+        self.path_attributes().and_then(|a| a.as_path.as_ref())
+    }
+
+    pub fn origin_asns(&self) -> Option<&[Asn]> {
+        self.path_attributes()
+            .and_then(|a| a.origin_asns.as_deref())
+    }
+
+    pub fn origin(&self) -> Option<Origin> {
+        self.path_attributes().and_then(|a| a.origin)
+    }
+
+    pub fn local_pref(&self) -> Option<u32> {
+        self.path_attributes().and_then(|a| a.local_pref)
+    }
+
+    pub fn med(&self) -> Option<u32> {
+        self.path_attributes().and_then(|a| a.med)
+    }
+
+    pub fn communities(&self) -> Option<&[MetaCommunity]> {
+        self.path_attributes()
+            .and_then(|a| a.communities.as_deref())
+    }
+
+    pub fn atomic(&self) -> bool {
+        self.path_attributes().map(|a| a.atomic).unwrap_or(false)
+    }
+
+    pub fn aggr_asn(&self) -> Option<Asn> {
+        self.path_attributes().and_then(|a| a.aggr_asn)
+    }
+
+    pub fn aggr_ip(&self) -> Option<BgpIdentifier> {
+        self.path_attributes().and_then(|a| a.aggr_ip)
+    }
+
+    pub fn only_to_customer(&self) -> Option<Asn> {
+        self.path_attributes().and_then(|a| a.only_to_customer)
+    }
+
+    pub fn unknown(&self) -> Option<&[AttrRaw]> {
+        self.path_attributes().and_then(|a| a.unknown.as_deref())
+    }
+
+    pub fn deprecated(&self) -> Option<&[AttrRaw]> {
+        self.path_attributes().and_then(|a| a.deprecated.as_deref())
+    }
+
+    /// Returns the origin AS number as u32. Returns None if the origin AS
+    /// number is not present or it is an AS set.
+    pub fn get_origin_asn_opt(&self) -> Option<u32> {
+        let origin_asns = self.origin_asns()?;
+        (origin_asns.len() == 1).then(|| origin_asns[0].into())
+    }
+
+    /// Returns the PSV header as a string.
+    pub fn get_psv_header() -> String {
+        BgpElem::get_psv_header()
+    }
+
+    /// Converts the struct fields into a pipe-separated values (PSV) formatted string.
+    pub fn to_psv(&self) -> String {
+        let t = match self.elem_type {
+            ElemType::ANNOUNCE => "A",
+            ElemType::WITHDRAW => "W",
+        };
+        let attrs = self.path_attributes();
+        let as_path = attrs.and_then(|a| a.as_path.as_ref());
+        let origin_asns = attrs.and_then(|a| a.origin_asns.as_ref());
+        let origin = attrs.and_then(|a| a.origin);
+        let next_hop = attrs.and_then(|a| a.next_hop);
+        let local_pref = attrs.and_then(|a| a.local_pref);
+        let med = attrs.and_then(|a| a.med);
+        let communities = attrs.and_then(|a| a.communities.as_ref());
+        let atomic = attrs.map(|a| a.atomic).unwrap_or(false);
+        let aggr_asn = attrs.and_then(|a| a.aggr_asn);
+        let aggr_ip = attrs.and_then(|a| a.aggr_ip);
+        let only_to_customer = attrs.and_then(|a| a.only_to_customer);
+
+        format!(
+            "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+            t,
+            &self.timestamp,
+            &self.peer_ip,
+            &self.peer_asn,
+            &self.prefix,
+            OptionToStr(&as_path),
+            match origin_asns {
+                Some(v) => v.iter().map(|e| e.to_string()).join(" "),
+                None => String::new(),
+            },
+            OptionToStr(&origin),
+            OptionToStr(&next_hop),
+            OptionToStr(&local_pref),
+            OptionToStr(&med),
+            option_to_string_communities_ref(communities),
+            atomic,
+            OptionToStr(&aggr_asn),
+            OptionToStr(&aggr_ip),
+            OptionToStr(&only_to_customer),
+        )
+    }
+}
+
+#[allow(deprecated)]
 impl BgpElem {
     /// Returns true if the element is an announcement.
     ///
@@ -437,6 +708,34 @@ impl BgpElem {
     }
 }
 
+#[allow(deprecated)]
+impl From<&BgpSharedPathAttributeElem> for BgpElem {
+    fn from(value: &BgpSharedPathAttributeElem) -> Self {
+        let attrs = value.path_attributes.as_deref();
+        BgpElem {
+            timestamp: value.timestamp,
+            elem_type: value.elem_type,
+            peer_ip: value.peer_ip,
+            peer_asn: value.peer_asn,
+            peer_bgp_id: value.peer_bgp_id,
+            prefix: value.prefix,
+            next_hop: attrs.and_then(|a| a.next_hop),
+            as_path: attrs.and_then(|a| a.as_path.clone()),
+            origin_asns: attrs.and_then(|a| a.origin_asns.clone()),
+            origin: attrs.and_then(|a| a.origin),
+            local_pref: attrs.and_then(|a| a.local_pref),
+            med: attrs.and_then(|a| a.med),
+            communities: attrs.and_then(|a| a.communities.clone()),
+            atomic: attrs.map(|a| a.atomic).unwrap_or(false),
+            aggr_asn: attrs.and_then(|a| a.aggr_asn),
+            aggr_ip: attrs.and_then(|a| a.aggr_ip),
+            only_to_customer: attrs.and_then(|a| a.only_to_customer),
+            unknown: attrs.and_then(|a| a.unknown.clone()),
+            deprecated: attrs.and_then(|a| a.deprecated.clone()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -455,6 +754,33 @@ mod tests {
             ..Default::default()
         };
         println!("{}", serde_json::json!(elem));
+    }
+
+    #[test]
+    #[cfg(feature = "serde")]
+    fn test_shared_elem_serde_roundtrip() {
+        let elem = BgpSharedPathAttributeElem {
+            timestamp: 1.0,
+            elem_type: ElemType::ANNOUNCE,
+            peer_ip: IpAddr::from_str("192.168.1.1").unwrap(),
+            peer_asn: 64496.into(),
+            peer_bgp_id: None,
+            prefix: NetworkPrefix::from_str("8.8.8.0/24").unwrap(),
+            path_attributes: Some(Arc::new(BgpSharedPathAttributes {
+                next_hop: Some(IpAddr::from_str("192.168.1.254").unwrap()),
+                as_path: Some(AsPath::from_sequence([64496, 64497])),
+                origin_asns: Some(vec![64497.into()]),
+                origin: Some(Origin::IGP),
+                local_pref: Some(100),
+                med: Some(200),
+                communities: Some(vec![MetaCommunity::Plain(Community::NoAdvertise)]),
+                ..Default::default()
+            })),
+        };
+
+        let serialized = serde_json::to_string(&elem).unwrap();
+        let deserialized: BgpSharedPathAttributeElem = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(elem, deserialized);
     }
 
     #[test]
@@ -528,6 +854,12 @@ mod tests {
         let elem = BgpElem::default();
         assert_eq!(
             elem.to_psv().as_str(),
+            "A|0|0.0.0.0|0|0.0.0.0/0||||0.0.0.0||||false|||"
+        );
+
+        let shared = BgpSharedPathAttributeElem::default();
+        assert_eq!(
+            shared.to_psv().as_str(),
             "A|0|0.0.0.0|0|0.0.0.0/0||||0.0.0.0||||false|||"
         );
     }

@@ -9,6 +9,7 @@ This module contains different iterator implementations for parsing BGP data:
 It also contains the trait implementations that enable BgpkitParser to be used with
 Rust's iterator syntax.
 */
+#![allow(deprecated)]
 
 pub mod default;
 pub mod fallible;
@@ -17,8 +18,8 @@ mod route;
 mod update;
 
 // Re-export all iterator types for convenience
-pub use default::{ElemIterator, RecordIterator};
-pub use fallible::{FallibleElemIterator, FallibleRecordIterator};
+pub use default::{ElemIterator, RecordIterator, SharedElemIterator};
+pub use fallible::{FallibleElemIterator, FallibleRecordIterator, FallibleSharedElemIterator};
 pub use raw::RawRecordIterator;
 pub use route::{FallibleRouteIterator, RouteIterator};
 pub use update::{
@@ -64,8 +65,16 @@ impl<R> BgpkitParser<R> {
         RecordIterator::new(self)
     }
 
+    #[deprecated(
+        since = "0.16.0",
+        note = "use into_shared_elem_iter; owned BgpElem removal is planned after 2026-11-09"
+    )]
     pub fn into_elem_iter(self) -> ElemIterator<R> {
         ElemIterator::new(self)
+    }
+
+    pub fn into_shared_elem_iter(self) -> SharedElemIterator<R> {
+        SharedElemIterator::new(self)
     }
 
     pub fn into_raw_record_iter(self) -> RawRecordIterator<R> {
@@ -168,8 +177,17 @@ impl<R> BgpkitParser<R> {
     ///     }
     /// }
     /// ```
+    #[deprecated(
+        since = "0.16.0",
+        note = "use into_fallible_shared_elem_iter; owned BgpElem removal is planned after 2026-11-09"
+    )]
     pub fn into_fallible_elem_iter(self) -> FallibleElemIterator<R> {
         FallibleElemIterator::new(self)
+    }
+
+    /// Creates a fallible iterator over shared BGP elements that returns parsing errors.
+    pub fn into_fallible_shared_elem_iter(self) -> FallibleSharedElemIterator<R> {
+        FallibleSharedElemIterator::new(self)
     }
 
     /// Creates a fallible iterator over BGP announcements that returns parsing errors.

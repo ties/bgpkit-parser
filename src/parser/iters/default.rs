@@ -1,6 +1,7 @@
 /*!
 Default iterator implementations that skip errors and return successfully parsed items.
 */
+#![allow(deprecated)]
 use crate::error::ParserError;
 use crate::models::*;
 use crate::parser::BgpkitParser;
@@ -124,6 +125,10 @@ impl<R: Read> Iterator for RecordIterator<R> {
 BgpElem Iterator
 **********/
 
+#[deprecated(
+    since = "0.16.0",
+    note = "use SharedElemIterator via BgpkitParser::into_shared_elem_iter; owned BgpElem removal is planned after 2026-11-09"
+)]
 pub struct ElemIterator<R> {
     cache_elems: Vec<BgpElem>,
     record_iter: RecordIterator<R>,
@@ -138,6 +143,65 @@ impl<R> ElemIterator<R> {
             count: 0,
             cache_elems: vec![],
             elementor: Elementor::new(),
+        }
+    }
+}
+
+/*********
+BgpSharedPathAttributeElem Iterator
+**********/
+
+pub struct SharedElemIterator<R> {
+    cache_elems: Vec<BgpSharedPathAttributeElem>,
+    record_iter: RecordIterator<R>,
+    elementor: Elementor,
+    count: u64,
+}
+
+impl<R> SharedElemIterator<R> {
+    pub(crate) fn new(parser: BgpkitParser<R>) -> Self {
+        SharedElemIterator {
+            record_iter: RecordIterator::new(parser),
+            count: 0,
+            cache_elems: vec![],
+            elementor: Elementor::new(),
+        }
+    }
+}
+
+impl<R: Read> Iterator for SharedElemIterator<R> {
+    type Item = BgpSharedPathAttributeElem;
+
+    fn next(&mut self) -> Option<BgpSharedPathAttributeElem> {
+        self.count += 1;
+
+        loop {
+            if self.cache_elems.is_empty() {
+                loop {
+                    match self.record_iter.next() {
+                        None => return None,
+                        Some(r) => {
+                            let mut elems = self.elementor.record_to_shared_elems(r);
+                            if elems.is_empty() {
+                                continue;
+                            } else {
+                                elems.reverse();
+                                self.cache_elems = elems;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            let elem = self.cache_elems.pop();
+            match elem {
+                None => return None,
+                Some(e) => match e.match_filters(&self.record_iter.parser.filters) {
+                    true => return Some(e),
+                    false => continue,
+                },
+            }
         }
     }
 }
